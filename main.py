@@ -105,14 +105,20 @@ with st.sidebar:
         st.rerun()
 
 SEASON, TRENDS = get_season_stats(), get_ou_trends()
+now_utc = datetime.now(timezone.utc)
 games = scoreboard.ScoreBoard().get_dict()["scoreboard"]["games"]
+
 if live_only:
-    games = [g for g in games if is_live(g["gameStatusText"])]
+    games = [
+        game for game in games
+        if datetime.fromisoformat(game["gameTimeUTC"].replace('Z', '+00:00')) <= now_utc
+    ]
 
 cols = st.columns(2, gap="small")
 
 for i, g in enumerate(games):
     col = cols[i % 2]
+    tip_off_time = g["gameTimeUTC"]
     with col:
         with st.container(border=True):
             a, h = g["awayTeam"], g["homeTeam"]
