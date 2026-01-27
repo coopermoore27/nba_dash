@@ -68,16 +68,42 @@ def get_pinnacle_total(away_full, home_full, tip_off_iso):
     except: return None
     return None
 
+
 def fetch_kalshi_total(a, h):
-    today = datetime.now().strftime("%y%b%d").upper()
-    ticker = f"KXNBATOTAL-{today}{a}{h}"
-    try:
-        r = requests.get("https://api.elections.kalshi.com/trade-api/v2/markets", params={"event_ticker": ticker, "status": "open"}, timeout=5)
-        mkts = r.json().get("markets", [])
-        if mkts:
-            main = min(mkts, key=lambda x: abs((x.get("yes_bid") or 0) - 50))
-            return float(main["ticker"].split("-")[-1])
-    except: return None
+    """Fetches Kalshi total with explicit UTC date handling to avoid ticker mismatches."""
+    # Force UTC to ensure ticker matches Kalshi's server time
+    now = datetime.now(timezone.utc)
+
+    # Kalshi tickers use YYMONDD format (e.g., 26JAN26)
+    today_str = now.strftime("%y%b%d").upper()
+
+    def get_val(date_str):
+        ticker = f"KXNBATOTAL-{date_str}{a}{h}"
+        try:
+            r = requests.get(
+                "https://api.elections.kalshi.com/trade-api/v2/markets",
+                params={"event_ticker": ticker, "status": "open"},
+                timeout=5
+            )
+            mkts = r.json().get("markets", [])
+            if mkts:
+                # Find the market closest to 50/50 (the current 'line')
+                main = min(mkts, key=lambda x: abs((x.get("yes_bid") or 0) - 50))
+                # Extract the number from the ticker end: KXNBATOTAL-26JAN26CLEORL-225.5
+                return float(main["ticker"].split("-")[-1])
+        except:
+            return None
+        return None
+
+    # Try today's ticker
+    val = get_val(today_str)
+
+    # Fallback: Try yesterday's ticker (handles games crossing midnight UTC)
+    if val is None:
+        yesterday_str = (now - timedelta(days=1)).strftime("%y%b%d").upper()
+        val = get_val(yesterday_str)
+
+    return val
 
 def get_quarter_fouls(game_id):
     try:
