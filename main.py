@@ -142,7 +142,7 @@ for i, g in enumerate(games):
                 st.write(f"{a_tri}: {al['fieldGoalsPercentage']:.0%} FG | {al['threePointersPercentage']:.0%} 3P")
                 st.write(f"{h_tri}: {hl['fieldGoalsPercentage']:.0%} FG | {hl['threePointersPercentage']:.0%} 3P")
                 fouls, q = get_quarter_fouls(g["gameId"])
-                st.caption(f"Q{q} Fouls — {a_tri}: {fouls.get(a_tri, 0)} | {h_tri}: {fouls.get(h_tri, 0)}")
+                st.caption(f"Q{q} Fouls: {a_tri}:{fouls.get(a_tri, 0)} | {h_tri}:{fouls.get(h_tri, 0)}")
             except: st.caption("Updating…")
             st.divider()
             st.write("**O/U Trends**")
@@ -153,7 +153,7 @@ for i, g in enumerate(games):
         with c3:
             tip = get_pinnacle_total(a_full, h_full, g["gameTimeUTC"])
             live = fetch_kalshi_total(a_tri, h_tri)
-            if tip: st.write(f"**Pinnacle:** {tip}")
+            if tip: st.write(f"**Pregame:** {tip}")
             if live: st.write(f"**Live:** {live}")
             if tip and live:
                 diff = live - tip
