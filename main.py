@@ -38,14 +38,11 @@ def get_ou_trends():
 
 @st.cache_data(ttl=3600)
 def get_season_stats():
-    # Per Game for basic stats
     off = leaguedashteamstats.LeagueDashTeamStats(season="2025-26", per_mode_detailed="PerGame").get_data_frames()[0]
     defn = leaguedashteamstats.LeagueDashTeamStats(season="2025-26", measure_type_detailed_defense="Opponent",
                                                    per_mode_detailed="PerGame").get_data_frames()[0]
-    # Advanced for Pace/Ratings
     adv = leaguedashteamstats.LeagueDashTeamStats(season="2025-26",
                                                   measure_type_detailed_defense="Advanced").get_data_frames()[0]
-
     return {
         r.TEAM_ID: {
             "off_ppg": r.PTS, "off_fg": r.FG_PCT, "off_3p": r.FG3_PCT,
@@ -60,23 +57,42 @@ def get_season_stats():
     }
 
 
-# NEW PINNACLE LOGIC
 @st.cache_data(ttl=86400)
-def get_pinnacle_total(away_full, home_full, tip_off_iso):
+def get_pregame_total(away_full, home_full, tip_off_iso):
+    """Robust fetch: tries multiple timestamps and name variations."""
     api_key = "b4fed2e35cfad747e07268fbb1377c2d"
     tip_dt = datetime.fromisoformat(tip_off_iso.replace('Z', '+00:00'))
-    target_iso = (tip_dt - timedelta(minutes=10)).strftime('%Y-%m-%dT%H:%M:%SZ')
+
+    # Handle "LA" vs "Los Angeles" variations
+    away_variations = [away_full, away_full.replace("LA ", "Los Angeles "), away_full.replace("Los Angeles ", "LA ")]
+    home_variations = [home_full, home_full.replace("LA ", "Los Angeles "), home_full.replace("Los Angeles ", "LA ")]
+
     url = "https://api.the-odds-api.com/v4/historical/sports/basketball_nba/odds"
-    params = {"apiKey": api_key, "regions": "eu", "markets": "totals", "date": target_iso}
-    try:
-        resp = requests.get(url, params=params, timeout=5).json()
-        for g in resp.get('data', []):
-            if g['away_team'] == away_full and g['home_team'] == home_full:
-                for b in g.get('bookmakers', []):
-                    if b['key'] == 'pinnacle':
-                        return float(b['markets'][0]['outcomes'][0]['point'])
-    except:
-        return None
+
+    # Try snapshots at T-10, T-30, and T-60 to find the best closing line
+    for mins_back in [10, 30, 60]:
+        target_iso = (tip_dt - timedelta(minutes=mins_back)).strftime('%Y-%m-%dT%H:%M:%SZ')
+        params = {"apiKey": api_key, "regions": "eu,us", "markets": "totals", "date": target_iso}
+
+        try:
+            resp = requests.get(url, params=params, timeout=5).json()
+            games_data = resp.get('data', [])
+
+            # Search for any of our name variations
+            match = None
+            for g in games_data:
+                if g['away_team'] in away_variations and g['home_team'] in home_variations:
+                    match = g
+                    break
+
+            if match:
+                bookies = {b['key']: b for b in match.get('bookmakers', [])}
+                # Priority: Pinnacle -> FanDuel -> DraftKings
+                for key in ['pinnacle', 'fanduel', 'draftkings', 'betmgm']:
+                    if key in bookies:
+                        return float(bookies[key]['markets'][0]['outcomes'][0]['point'])
+        except:
+            continue
     return None
 
 
@@ -95,7 +111,6 @@ def fetch_kalshi_total(a, h):
                 return float(main["ticker"].split("-")[-1])
         except:
             return None
-        return None
 
     val = get_val(today_str)
     if val is None:
@@ -116,12 +131,18 @@ def get_quarter_fouls(game_id):
         return {}, None
 
 
+def calculate_elapsed_minutes(status_text, period):
+    try:
+        if "Half" in status_text: return 24.0
+        parts = status_text.split(" ")
+        if len(parts) < 2 or ":" not in parts[1]: return float((period - 1) * 12)
+        mins, secs = map(float, parts[1].split(":")[0:2])
+        return max(((period - 1) * 12) + (12.0 - (mins + secs / 60)), 0.1)
+    except:
+        return max(float((period - 1) * 12), 0.1)
+
+
 # ---------------- DISPLAY ----------------
-def is_live(status):
-    s = status.lower()
-    return any(k in s for k in ["q1", "q2", "q3", "q4", "half", "end", ":"]) and not any(k in s for k in ["pm", "et"])
-
-
 st.title("🏀 NBA Live Totals Dashboard")
 
 with st.sidebar:
@@ -134,11 +155,11 @@ with st.sidebar:
         st.rerun()
 
 SEASON, TRENDS = get_season_stats(), get_ou_trends()
-now_utc = datetime.now(timezone.utc)
 games = scoreboard.ScoreBoard().get_dict()["scoreboard"]["games"]
 
+# Filter for games in progress (Halftime is fine, Final is removed)
 if live_only:
-    games = [game for game in games if datetime.fromisoformat(game["gameTimeUTC"].replace('Z', '+00:00')) <= now_utc]
+    games = [g for g in games if g["gameStatus"] == 2]
 
 cols = st.columns(2, gap="small")
 
@@ -148,6 +169,7 @@ for i, g in enumerate(games):
         with st.container(border=True):
             a, h = g["awayTeam"], g["homeTeam"]
             a_tri, h_tri = a["teamTricode"], h["teamTricode"]
+            # Formatting full names for the Odds API
             a_full, h_full = f"{a['teamCity']} {a['teamName']}", f"{h['teamCity']} {h['teamName']}"
             st.markdown(f"**{a_tri} {a['score']} @ {h_tri} {h['score']} — {g['gameStatusText']}**")
             c1, c2, c3 = st.columns([1.2, 1.1, 0.9])
@@ -170,16 +192,19 @@ for i, g in enumerate(games):
 
         with c2:
             try:
-                box = boxscore.BoxScore(g["gameId"]).get_dict()["game"]
-                al, hl = box["awayTeam"]["statistics"], box["homeTeam"]["statistics"]
-                # Live ORtg Calculation
+                box_data = boxscore.BoxScore(g["gameId"]).get_dict()["game"]
+                al, hl = box_data["awayTeam"]["statistics"], box_data["homeTeam"]["statistics"]
                 a_poss = al['fieldGoalsAttempted'] + 0.44 * al['freeThrowsAttempted'] - al['reboundsOffensive'] + al[
                     'turnovers']
                 h_poss = hl['fieldGoalsAttempted'] + 0.44 * hl['freeThrowsAttempted'] - hl['reboundsOffensive'] + hl[
                     'turnovers']
                 avg_p = (a_poss + h_poss) / 2
+
                 a_live_ortg = (al['points'] / avg_p * 100) if avg_p > 0 else 0
                 h_live_ortg = (hl['points'] / avg_p * 100) if avg_p > 0 else 0
+
+                elapsed_mins = calculate_elapsed_minutes(g["gameStatusText"], g["period"])
+                live_pace = (avg_p / elapsed_mins) * 48
 
                 st.write("**Live Stats**")
                 st.write(
@@ -189,16 +214,18 @@ for i, g in enumerate(games):
 
                 fouls, q = get_quarter_fouls(g["gameId"])
                 st.caption(f"Q{q} Fouls: {a_tri}:{fouls.get(a_tri, 0)} | {h_tri}:{fouls.get(h_tri, 0)}")
-                st.caption(f"Live Pace: {avg_p:.1f} Poss")
+                st.write(f"**Live Pace: {live_pace:.1f}**")
+                st.caption(f"Total Possessions: {avg_p:.1f}")
             except:
                 st.caption("Updating…")
+
             st.divider()
             st.write("**O/U Trends**")
             st.caption(f"{a_tri}: {TRENDS.get(a_tri, '--')}")
             st.caption(f"{h_tri}: {TRENDS.get(h_tri, '--')}")
 
         with c3:
-            tip = get_pinnacle_total(a_full, h_full, g["gameTimeUTC"])
+            tip = get_pregame_total(a_full, h_full, g["gameTimeUTC"])
             live = fetch_kalshi_total(a_tri, h_tri)
             if tip: st.write(f"**Pregame:** {tip}")
             if live: st.write(f"**Live:** {live}")
